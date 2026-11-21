@@ -1,82 +1,85 @@
 
-#!/bin/bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT=/mnt
-BOOT=/mnt/boot
-LOG=/tmp/arch-repair.log
+ROOT="/mnt"
+EFI="/mnt/boot"
+DISK="/dev/sda"
+EFI_PART="/dev/sda1"
 
-exec > >(tee -a "$LOG") 2>&1
+echo "=== Arch Linux GRUB UEFI Installer ==="
 
-trap 'echo "ERROR: Repair stopped at line $LINENO. Log: $LOG"' ERR
-
-echo "=== ARCH BOOT REPAIR ==="
-
-# Verify environment
-[[ $EUID -eq 0 ]] || { echo "Run as root"; exit 1; }
-mountpoint -q "$ROOT" || { echo "/mnt is not mounted"; exit 1; }
-mountpoint -q "$BOOT" || { echo "/mnt/boot is not mounted"; exit 1; }
-[[ -f "$ROOT/etc/arch-release" ]] || {
-    echo "Arch installation not found"
-    exit 1
-}
-
-FSTYPE=$(findmnt -n -o FSTYPE "$BOOT")
-[[ "$FSTYPE" == "vfat" ]] || {
-    echo "EFI partition must be FAT32"
-    exit 1
-}
-
-echo "[1/6] Checking EFI boot mode..."
-
+# Verify UEFI
 if [[ ! -d /sys/firmware/efi ]]; then
-    echo "ERROR: Live USB was not booted in UEFI mode."
+    echo "ERROR: System is not booted in UEFI mode."
     exit 1
 fi
 
-echo "[2/6] Installing required packages..."
+# Verify partitions
+[[ -d "$ROOT/etc" ]] || {
+    echo "ERROR: Arch root is not mounted at /mnt"
+    exit 1
+}
+
+[[ "$(findmnt -n -o SOURCE "$ROOT")" == "/dev/sda5" ]] || {
+    echo "ERROR: Unexpected root partition."
+    exit 1
+}
+
+[[ "$(findmnt -n -o SOURCE "$EFI")" == "$EFI_PART" ]] || {
+    echo "ERROR: EFI partition is not mounted correctly."
+    exit 1
+}
+
+# Verify FAT filesystem
+[[ "$(blkid -s TYPE -o value "$EFI_PART")" == "vfat" ]] || {
+    echo "ERROR: EFI partition is not FAT32."
+    exit 1
+}
+
+# Check free space
+FREE_KB=$(df -Pk "$EFI" | awk 'NR==2 {print $4}')
+
+if (( FREE_KB < 15000 )); then
+    echo "ERROR: Not enough free space on EFI partition."
+    echo "At least 15 MB is required."
+    exit 1
+fi
+
+# Verify required directories
+[[ -d "$ROOT/usr" && -d "$ROOT/boot" ]] || {
+    echo "ERROR: Invalid Arch installation."
+    exit 1
+}
+
+echo "Installing GRUB..."
 
 arch-chroot "$ROOT" pacman -S --needed --noconfirm \
-    linux linux-firmware mkinitcpio grub efibootmgr
+    grub efibootmgr
 
-echo "[3/6] Checking kernel image..."
-
-if [[ ! -s "$BOOT/vmlinuz-linux" ]]; then
-    echo "Kernel image missing. Reinstalling kernel..."
-    arch-chroot "$ROOT" pacman -S --noconfirm linux
-fi
-
-arch-chroot "$ROOT" bash -c '
-    [[ -s /boot/vmlinuz-linux ]] || {
-        echo "Kernel image still missing"
-        exit 1
-    }
-'
-
-echo "[4/6] Generating initramfs..."
-
-arch-chroot "$ROOT" mkinitcpio -P
-
-echo "[5/6] Installing GRUB..."
-
+# Install GRUB
 arch-chroot "$ROOT" grub-install \
     --target=x86_64-efi \
     --efi-directory=/boot \
-    --bootloader-id=Arch \
-    --removable
+    --bootloader-id=GRUB \
+    --no-nvram \
+    --recheck
 
-echo "[6/6] Generating GRUB configuration..."
-
+# Generate configuration
 arch-chroot "$ROOT" grub-mkconfig \
     -o /boot/grub/grub.cfg
 
-echo
-echo "=== VERIFYING BOOT FILES ==="
+# Verify EFI executable
+if [[ ! -s "$EFI/EFI/GRUB/grubx64.efi" ]]; then
+    echo "ERROR: GRUB EFI executable was not created."
+    exit 1
+fi
 
-ls -lh "$BOOT/EFI/BOOT"
-ls -lh "$BOOT/EFI/Arch"
-ls -lh "$BOOT/vmlinuz-linux"
-
 echo
-echo "=== REPAIR COMPLETED ==="
-echo "Log: $LOG"
+echo "=== GRUB installation completed ==="
+echo "EFI file: /boot/EFI/GRUB/grubx64.efi"
+echo "Config:   /boot/grub/grub.cfg"
+echo
+echo "No partitions were formatted."
+echo "No Windows partition
+s were modified."
